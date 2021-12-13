@@ -38,6 +38,9 @@ function est = run_filter(model,meas)
 est.X= cell(meas.K,1);
 est.N= zeros(meas.K,1);
 est.L= cell(meas.K,1);
+est.T= {};
+est.M= 0;
+est.J= []; est.H= {};
 
 %filter parameters
 filter.H_bth= 5;                    %requested number of birth components/hypotheses
@@ -74,7 +77,7 @@ for k=1:meas.K
     glmb_update= cap(glmb_update,filter);                       H_cap= length(glmb_update.w);
     
     %state estimation and display diagnostics
-    [est.X{k},est.N(k),est.L{k}]= extract_estimates(glmb_update,model);
+    est= extract_estimates_recursive(glmb_update,model,meas,est); %[est.X{k},est.N(k),est.L{k}]= extract_estimates(glmb_update,model);
     display_diaginfo(glmb_update,k,est,filter,H_predict,H_posterior,H_prune,H_cap);
     
 end
@@ -347,6 +350,69 @@ if length(glmb_in.w) > filter.H_max
     end
 else
     glmb_out= glmb_in;
+end
+end
+
+
+
+function est=extract_estimates_recursive(glmb,model,meas,est)
+%extract estimates via recursive estimator, where  
+%trajectories are extracted via association history, and
+%track continuity is guaranteed with a non-trivial estimator
+
+%extract MAP cardinality and corresponding highest weighted component
+[~,mode] = max(glmb.cdn); 
+M = mode-1;
+T= cell(M,1);
+J= zeros(2,M);
+
+[~,idxcmp]= max(glmb.w.*(glmb.n==M));
+for m=1:M
+    idxptr= glmb.I{idxcmp}(m);
+    T{m,1}= glmb.tt{idxptr}.ah;
+    J(:,m)= glmb.tt{idxptr}.l;
+end
+
+H= cell(M,1);
+for m=1:M
+   H{m}= [num2str(J(1,m)),'.',num2str(J(2,m))]; 
+end
+
+%compute dead & updated & new tracks
+[~,io,is]= intersect(est.H,H);
+[~,id,in]= setxor(est.H,H);
+
+est.M= M;
+est.T= cat(1,est.T(id),T(is),T(in));
+est.J= cat(2,est.J(:,id),J(:,is),J(:,in));
+est.H= cat(1,est.H(id),H(is),H(in));
+
+%write out estimates in standard format
+est.N= zeros(meas.K,1);
+est.X= cell(meas.K,1);
+est.L= cell(meas.K,1);
+for t=1:length(est.T)
+    ks= est.J(1,t);
+    bidx= est.J(2,t);
+    tah= est.T{t};
+    
+    w= ones(est.filter.npt,1)/est.filter.npt; 
+    x= gen_gms(model.w_birth{bidx},model.m_birth{bidx},model.P_birth{bidx},est.filter.npt);
+    for u=1:length(tah)
+        x= gen_newstate_fn(model,x,'noise');
+        k= ks+u-1;
+        emm= tah(u);
+        if emm > 0
+            qz = compute_likelihood(model,meas.Z{k}(:,emm),x)';
+            w= qz.*w+eps;
+            w= w/sum(w);
+        end
+
+        
+        est.N(k)= est.N(k)+1;
+        est.X{k}= cat(2,est.X{k},x*w(:));
+        est.L{k}= cat(2,est.L{k},est.J(:,t));
+    end
 end
 end
 
